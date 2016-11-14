@@ -150,32 +150,69 @@ class Couleur(enum.Enum):
     gris = 3
     vert = 4
 
+    def depuis_str(nom):
+        if nom[0] == 'b':
+            return Couleur.bleu
+        elif nom[0] == 'n':
+            return Couleur.noir
+        elif nom[0] == 'g':
+            return Couleur.gris
+        elif nom[0] == 'v':
+            return Couleur.vert
 
-Paire = collections.namedtuple("Paire", ["sprinteur", "rouleur"])
+        raise ValueError('Couleur sérialisée {} invalide'.format(nom))
+
+
+class Paire(collections.namedtuple("Paire", ["sprinteur", "rouleur"])):
+
+        def vers_liste(self):
+            return [self.sprinteur, self.rouleur]
+
+        def depuis_liste(liste):
+            return Paire(liste[0], liste[1])
+
 
 
 class ClientServeur:
 
-    def send(self, socket_tx, msg):
-        socket_tx.send('{}:'.format(len(msg)).encode('utf-8'))
-        socket_tx.send(msg)
-        return socket_tx
+    def init_serveur(self, adresse):
+        serveur = socket.socket(
+            socket.AF_INET, socket.SOCK_STREAM)
+        serveur.bind((adresse, 0))
+        print("Écoute sur le port {}".format(serveur.getsockname()[1]))
+        serveur.listen(1)
+        self.socket = serveur.accept()[0]
 
-    def recv(self, socket_rx):
+    def init_client(self, adresse, port):
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.connect((adresse, port))
+
+    def send(self, msg):
+        self.socket.send('{}:'.format(len(msg)).encode('utf-8'))
+        self.socket.send(msg.encode('utf-8'))
+        return self.socket
+
+    def recv(self):
         longueur = 0
         while True:
-            message = socket_rx.recv(1).decode('utf-8')
+            donnée = self.socket.recv(1)
+            if len(donnée) == 0:
+                raise ValueError('Erreur réception message')
+
+            message = donnée.decode('utf-8')
             if message == ':' or message < '0' or message > '9':
                 break
             longueur = longueur * 10 + int(message)
 
         fragments = []
         while longueur > 0:
-            fragment = socket_rx.recv(longueur)
+            fragment = self.socket.recv(longueur)
+            if len(fragment) == 0:
+                raise ValueError('Erreur réception message')
             fragments.append(fragment)
             longueur -= len(fragment)
 
-        return b''.join(fragments)
+        return b''.join(fragments).decode('utf-8')
 
 
 class Client:
@@ -229,38 +266,36 @@ class ClientNul(Client):
 class ServeurConsole(Client, ClientServeur):
 
     def __init__(self):
-        serveur = socket.socket(
-            socket.AF_INET, socket.SOCK_STREAM)
-        serveur.bind((socket.gethostname(), 0))
-        print(serveur.getsockname()[1])
-        serveur.listen(1)
-        self.socket = serveur.accept()[0]
+        self.init_serveur(socket.gethostname())
 
     def afficher(self, tracé, début=None, garde=None, aspiration=list()):
-        message = pickle.dumps({"commande": "afficher",
-                                "tracé": tracé,
+        message = json.dumps({"commande": "afficher",
+                                "tracé": tracé.vers_dictionnaire(),
                                 "début": début,
                                 "garde": garde,
                                 "aspiration": aspiration})
-        self.send(self.socket, message)
+        self.send(message)
 
     def afficher_fatigue(self, tracé, fatigués):
-        message = pickle.dumps(
-            {"commande": "afficher_fatigue",
-             "tracé": tracé,
-             "fatigués": fatigués})
-        self.send(self.socket, message)
+        dic = {"commande": "afficher_fatigue",
+             "tracé": tracé.vers_dictionnaire()}
+        fatigue = dict()
+        for couleur in fatigués.keys():
+            fatigue[couleur.name[0]] = list(map(str, fatigués[couleur]))
+        dic['fatigués'] = fatigue
+        message = json.dumps(dic)
+        self.send(message)
 
     def demander_positions(self, tracé, libres):
-        message = pickle.dumps(
+        message = json.dumps(
             {"commande": "demander_positions",
-             "tracé": tracé,
+             "tracé": tracé.vers_dictionnaire(),
              "libres": libres})
         while True:
-            self.send(self.socket, message)
+            self.send(message)
             try:
-                réponse = self.recv(self.socket)
-                positions = pickle.loads(réponse)
+                réponse = self.recv()
+                positions = Paire.depuis_liste(json.loads(réponse))
                 libres_temp = list(libres)
                 sprinteur = positions.sprinteur
                 rouleur = positions.rouleur
@@ -270,20 +305,20 @@ class ServeurConsole(Client, ClientServeur):
             except ValueError as err:
                 pass
 
-        # message = pickle.dumps({"commande": "position_ok"})
-        # self.send(self.socket, message)
+        # message = json.dumps({"commande": "position_ok"})
+        # self.send(message)
 
         return Paire(sprinteur, rouleur)
 
     def demander_jeu(self, énergies_sprinteur, énergies_rouleur):
-        message = pickle.dumps({"commande": "demander_jeu",
+        message = json.dumps({"commande": "demander_jeu",
                                 "énergies_sprinteur": énergies_sprinteur,
                                 "énergies_rouleur": énergies_rouleur})
         while True:
-            self.send(self.socket, message)
+            self.send(message)
             try:
-                réponse = self.recv(self.socket)
-                énergies = pickle.loads(réponse)
+                réponse = self.recv()
+                énergies = Paire.depuis_liste(json.loads(réponse))
                 sprinteur = énergies.sprinteur
                 rouleur = énergies.rouleur
                 énergies_sprinteur_temp = list(énergies_sprinteur)
@@ -294,22 +329,22 @@ class ServeurConsole(Client, ClientServeur):
             except ValueError:
                 pass
 
-        # message = pickle.dumps({"commande": "jeu_ok"})
-        # self.send(self.socket, message)
+        # message = json.dumps({"commande": "jeu_ok"})
+        # self.send(message)
 
         return Paire(sprinteur, rouleur)
 
     def ordre(self, couleurs):
-        message = pickle.dumps({"commande": "ordre", "couleurs": couleurs})
-        self.send(self.socket, message)
+        message = json.dumps({"commande": "ordre", "couleurs": couleurs})
+        self.send(message)
 
     def attente(self, couleurs):
-        message = pickle.dumps({"commande": "attente", "couleurs": couleurs})
-        self.send(self.socket, message)
+        message = json.dumps({"commande": "attente", "couleurs": couleurs})
+        self.send(message)
 
     def couleur(self, couleur):
-        message = pickle.dumps({"commande": "couleur", "couleur": couleur})
-        self.send(self.socket, message)
+        message = json.dumps({"commande": "couleur", "couleur": couleur.value})
+        self.send(message)
 
 
 class Console(Client):
@@ -396,42 +431,49 @@ class Console(Client):
 class ClientConsole(Console, ClientServeur):
 
     def __init__(self, adresse, port):
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.connect((adresse, port))
+        self.init_client(adresse, port)
 
     def jouer(self):
         while True:
             try:
-                message = self.recv(self.socket)
-                msg = pickle.loads(message)
+                message = self.recv()
+                msg = json.loads(message)
                 if msg['commande'] == "afficher":
                     Console.afficher(
                         self,
-                        msg['tracé'],
+                        Tracé.depuis_dictionnaire(msg['tracé']),
                         msg['début'],
                         msg['garde'],
                         msg['aspiration'])
                 elif msg['commande'] == "afficher_fatigue":
+                    fatigués = dict()
+                    for c in msg['fatigués'].keys():
+                        couleur = Couleur.depuis_str(c)
+                        fatigués[couleur] = list()
+                        for pion in msg['fatigués'][c]:
+                            fatigués[couleur].append(Pion.depuis_str(pion))
                     Console.afficher_fatigue(
-                        self, msg['tracé'], msg['fatigués'])
+                        self, Tracé.depuis_dictionnaire(
+                            msg['tracé']), fatigués)
                 elif msg['commande'] == "demander_positions":
                     positions = Console.demander_positions(
-                        self, msg['tracé'], msg['libres'])
-                    réponse = pickle.dumps(positions)
-                    self.socket = self.send(self.socket, réponse)
+                        self, Tracé.depuis_dictionnaire(
+                            msg['tracé']), msg['libres'])
+                    réponse = json.dumps(positions.vers_liste())
+                    self.socket = self.send(réponse)
                 elif msg['commande'] == "demander_jeu":
                     énergies = Console.demander_jeu(
                         self, msg['énergies_sprinteur'],
                         msg['énergies_rouleur'])
-                    réponse = pickle.dumps(énergies)
-                    self.socket = self.send(self.socket, réponse)
+                    réponse = json.dumps(énergies.vers_liste())
+                    self.socket = self.send(réponse)
                 elif msg['commande'] == "ordre":
                     Console.ordre(self, msg['couleurs'])
                     break
                 elif msg['commande'] == "attente":
                     Console.attente(self, msg['couleurs'])
                 elif msg['commande'] == "couleur":
-                    Console.couleur(self, msg['couleur'])
+                    Console.couleur(self, Couleur(msg['couleur']))
             except ValueError as err:
                 print(err)
                 pass
@@ -634,6 +676,20 @@ class Case:
         else:
             self.gauche = None
 
+    def vers_dictionnaire(self):
+        return {
+            'gauche': str(
+                self.gauche), 'droite': str(
+                self.droite), 'pente': self.pente.value}
+
+    def depuis_dictionnaire(dic):
+        case = Case(Pente(dic['pente']))
+        if dic['gauche'] != 'None':
+            case.gauche = Pion.depuis_str(dic['gauche'])
+        if dic['droite'] != 'None':
+            case.droite = Pion.depuis_str(dic['droite'])
+        return case
+
 
 class Profil(enum.Enum):
 
@@ -648,6 +704,16 @@ class Pion(collections.namedtuple("Pion", ["profil", "joueur"])):
         retour += self.joueur.couleur.name[0].lower()
 
         return retour
+
+    def depuis_str(nom):
+        if nom[0] == 'S':
+            profil = Profil.sprinteur
+        elif nom[0] == 'R':
+            profil = Profil.sprinteur
+        else:
+            raise ValueError('Pion sérialisé {} invalide'.format(nom))
+
+        return Pion(profil, Joueur(Couleur.depuis_str(nom[1])))
 
 
 class Tracé:
@@ -934,6 +1000,32 @@ class Tracé:
                 couleurs.append(pion.joueur.couleur)
 
         return couleurs
+
+    def vers_dictionnaire(self):
+        """Converti le tracé en dictionnaire serialisable
+        """
+        return {'classe': 'tracé',
+                'cases': list(map(lambda c: c.vers_dictionnaire(), self.cases)),
+                'arrivée': self._arrivée,
+                'départ': self._départ,
+                'positions': list(map(lambda p: (str(p[0]), p[1]),
+                                      list(self.positions.items())))}
+
+    def depuis_dictionnaire(dic):
+        """Importe un tracé depuis un dictionnaire serialisé
+        """
+        if dic['classe'] != 'tracé':
+            raise ValueError('Tracé sérialisé invalide')
+
+        cases = list()
+        for case in dic['cases']:
+            cases.append(Case.depuis_dictionnaire(case))
+        tracé = Tracé(cases, dic['arrivée'], dic['départ'])
+        tracé.positions = dict()
+        for position in dic['positions']:
+            tracé.positions[Pion.depuis_str(position[0])] = position[1]
+
+        return tracé
 
 
 def principal(nb_humains):
