@@ -47,6 +47,8 @@ import socket
 import sys
 import threading
 import time
+import websockets
+import asyncio
 
 
 def choisir_course(chemin):
@@ -213,6 +215,122 @@ class ClientServeur:
             longueur -= len(fragment)
 
         return b''.join(fragments).decode('utf-8')
+
+class ClientServeurWebsocket(ClientServeur):
+    def __init__(self):
+        ClientServeur.__init__(self)
+        self.commandes = list()
+        self.réponses = list()
+        self.event = threading.Event()
+        self.lock = threading.Lock()
+
+    def init_serveur(self, adresse):
+        ClientServeurWebsocket.__init__(self)
+        ServeurWebsocket.instance(adresse, 8090).ajouter_clientserveur(self)
+
+    def init_client(self, adresse, port):
+        ClientServeurWebsocket.__init__(self)
+        ClientWebSocket(adresse, port, self)
+
+    def send(self, msg):
+        self.lock.acquire()
+        self.commandes.append(msg)
+        self.lock.release()
+        self.event.set()
+
+    def recv(self):
+        réponse = dict({'état': threading.Event()})
+        self.lock.acquire()
+        self.réponses.append(réponse)
+        self.lock.release()
+        self.event.set()
+        réponse['état'].wait()
+        return réponse['données']
+
+class ClientWebSocket:
+    @asyncio.coroutine
+    def gestionnaire(self):
+        ws = yield from websockets.connect("ws://{}:{}/".format(self.adresse, self.port))
+        try:
+            print('====== Client connecté')
+            while True:
+                self.cs.event.wait()
+                self.cs.lock.acquire()
+                if len(self.cs.commandes):
+                    commande = self.cs.commandes.pop(0)
+                    yield from ws.send(commande)
+                if len(self.cs.réponses):
+                    réponse = self.cs.réponses.pop(0)
+                    print('recv1')
+                    réponse['données'] = yield from ws.recv()
+                    print('recv2')
+                    réponse['état'].set()
+                self.cs.lock.release()
+        finally:
+            yield from ws.close()
+
+    def init_client(self):
+        event_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(event_loop)
+        event_loop.run_until_complete(self.gestionnaire())
+
+    def __init__(self, adresse, port, cs):
+        self.cs = cs
+        self.adresse = adresse
+        self.port = 8090
+        self.tâche = threading.Thread(target=self.init_client)
+        self.tâche.start()
+
+class ServeurWebsocket:
+    _instance = None
+
+    def instance(adresse, port):
+        if not ServeurWebsocket._instance:
+            _instance = ServeurWebsocket(adresse, port)
+        return _instance
+
+    def init_serveur(self, adresse, port):
+        if port == 0:
+            port = None
+        serveur = websockets.serve(self.gestionnaire, adresse, port)
+        print("Écoute sur le port {}".format(port))
+        event_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(event_loop)
+        event_loop.run_until_complete(serveur)
+        event_loop.run_forever()
+
+    def __init__(self, adresse, port):
+        ServeurWebsocket.instance = self
+        self.cs_en_attente = list()
+        self.tâche = threading.Thread(target=self.init_serveur,
+                args=(adresse, port))
+        self.tâche.start()
+
+    def ajouter_clientserveur(self, clientserveur):
+        connection = dict({'état': False, 'cs': clientserveur})
+        self.cs_en_attente.append(connection)
+        while not connection['état']:
+            time.sleep(1)
+
+    @asyncio.coroutine
+    def gestionnaire(self, ws, path):
+        if not self.cs_en_attente:
+           return #TODO on refuse la connection
+        connection = self.cs_en_attente.pop(0)
+        connection['état'] = True
+        cs = connection['cs']
+        while True:
+            cs.event.wait()
+            cs.lock.acquire()
+            if len(cs.commandes):
+                commande = cs.commandes.pop(0)
+                yield from ws.send(commande)
+            if len(cs.réponses):
+                réponse = cs.réponses.pop(0)
+                réponse['données'] = yield from ws.recv()
+                réponse['état'].set()
+            cs.lock.release()
+
 
 
 class Client:
